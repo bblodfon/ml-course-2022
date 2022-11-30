@@ -9,7 +9,7 @@ site: bookdown::bookdown_site
 
 :::{.green-box}
 - We use the [mlr3](https://mlr3book.mlr-org.com/) ML framework for model building, training, testing, etc.
-- See full script for more details => [spam.R](put link here)
+- See full script for more details => [spam.R](https://github.com/bblodfon/ml-course-2022/blob/main/spam.R)
 :::
 
 # Libraries {-}
@@ -716,7 +716,7 @@ svm_pred$score() # ~5.2%
 
 :::{.note}
 - The results above were from manual tuning => I played around with the hyperparameters `cost`, `gamma`, `degree`, until I got a better (lower) error.
-- Can we do better? Well, it is difficult to properly tune these complex models! I tried a bit of Bayesian Optimization tuning (see [tuning_svms_on_spam.R](link)) and got $\approx 6\%$ error - so nothing too great.
+- Can we do better? Well, it is difficult to properly tune these complex models! I tried a bit of Bayesian Optimization tuning (see [tuning_svms_on_spam.R](https://github.com/bblodfon/ml-course-2022/blob/main/spam/tuning_svms_on_spam.R)) and got $\approx 6\%$ error - so nothing too great.
 :::
 
 # Neural Networks {-}

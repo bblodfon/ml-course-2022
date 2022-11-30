@@ -6,4 +6,4 @@ Our aim is to show how different ML models can be tuned, trained and tested usin
 Along the way, several Machine Learning aspects are demonstrated to gain further insight.
 We used the [mlr3](https://github.com/mlr-org/) ML framework for model building and evaluation.
 
-A gitbook report is available [online]().
+A gitbook report is available [online](https://bblodfon.github.io/ml-course-2022/).
