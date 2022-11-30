@@ -56,7 +56,7 @@ DT::datatable(
   # pick some rows to show
   data = task$data(rows = sample(x = task$nrow, size = 42)),
   caption = 'Sample of spam dataset from UCI ML repo (4601 x 58)',
-  options = list(searching = FALSE)
+  options = list(searching = FALSE, scrollY = 300, scrollCollapse = TRUE)
 ) %>%
   DT::formatStyle(columns = 'type', backgroundColor =
     DT::styleEqual(c('spam', 'nonspam'), c('#f18384', '#9cd49a')))
