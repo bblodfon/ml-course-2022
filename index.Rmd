@@ -1,0 +1,814 @@
+---
+title: "Spam Dataset Prediction using various ML models"
+author: "[John Zobolas](https://github.com/bblodfon)"
+date: "Last updated: `r format(Sys.time(), '%d %B, %Y')`"
+url: 'https\://druglogics.github.io/ml-course-2022/'
+github-repo: "bblodfon/ml-course-2022"
+site: bookdown::bookdown_site
+---
+
+:::{.green-box}
+- We use the [mlr3](https://mlr3book.mlr-org.com/) ML framework for model building, training, testing, etc.
+- See full script for more details => [spam.R](put link here)
+:::
+
+# Libraries {-}
+
+```{r Load libraries, message = FALSE, class.source = 'fold-show'}
+library(mlr3verse)
+library(tidyverse)
+library(precrec)
+library(scales)
+library(rpart) # trees
+library(glmnet) # lasso
+library(ranger) # random forest/bagged trees
+library(xgboost) # boosted trees
+library(e1071) # SVMs
+library(nnet) # single-hidden layer neural networks
+```
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  cache = FALSE, comment = ''
+)
+```
+
+# Models {-}
+
+We load the trained models (as these take time to train in a notebook) we are going to use later on:
+```{r}
+models = readRDS(file = 'spam/models.rds')
+```
+
+# Data {-}
+
+## Info {-}
+```{r}
+task = tsk('spam')
+task
+# task$help()
+which(task$missings() > 0) # no missing values, phew!
+```
+
+## Table visualization {-}
+```{r}
+DT::datatable(
+  # pick some rows to show
+  data = task$data(rows = sample(x = task$nrow, size = 42)),
+  caption = 'Sample of spam dataset from UCI ML repo (4601 x 58)',
+  options = list(searching = FALSE)
+) %>%
+  DT::formatStyle(columns = 'type', backgroundColor =
+    DT::styleEqual(c('spam', 'nonspam'), c('#f18384', '#9cd49a')))
+```
+
+## Target class balance {-}
+
+```{r, cache=TRUE} 
+autoplot(task, type = 'target') + ylim(c(0,3000))
+```
+
+```{r}
+task$data(cols = task$target_names) %>%
+  group_by(type) %>%
+  tally() %>%
+  mutate(freq.percent = scales::percent(n/sum(n), accuracy = 0.1))
+```
+
+## Partition to train and test sets {-}
+
+Stratified dataset partition (train:test ratio => 3:1, 75%:25%)
+
+```{r}
+split = partition(task, ratio = 0.75, stratify = TRUE)
+```
+
+How many rows (emails) for training?
+```{r}
+length(split$train)
+task$data(rows = split$train, cols = task$target_names) %>%
+  group_by(type) %>%
+  tally() %>%
+  mutate(freq.percent =  scales::percent(n/sum(n), accuracy = 0.1))
+```
+
+How many rows (emails) for testing?
+```{r}
+length(split$test)
+task$data(rows = split$test, cols = task$target_names) %>%
+  group_by(type) %>%
+  tally() %>%
+  mutate(freq.percent = scales::percent(n/sum(n), accuracy = 0.1))
+```
+
+Save split
+```{r}
+if ((!file.exists('spam/spam_split.rds'))) {
+  saveRDS(split, file = 'spam/spam_split.rds')
+  readr::write_lines(x = split$train, file = 'spam/train_index.txt')
+}
+split = readRDS(file = 'spam/spam_split.rds')
+train_indx = split$train
+test_indx  = split$test
+```
+
+
+# Trees {-}
+## Tree complexity tuning {-}
+
+:::{.blue-box}
+`cp` hyperparameter controls the bias-variance trade-off!
+:::
+
+```{r}
+if (!file.exists('spam/tree_res.rds')) {
+  cps = c(0, 0.0001, 0.0003, 0.0005, 0.0008, 0.001, 0.003, 0.005, 0.008, 0.01,
+    0.03, 0.05, 0.08, 0.1, 0.3, 0.5, 0.8, 1)
+
+  data_list = list()
+  index = 1
+  for (cp in cps) {
+    learner = lrn('classif.rpart', cp = cp)
+    learner$train(task, row_ids = train_indx)
+
+    train_error = learner$predict(task, row_ids = train_indx)$score()
+    test_error  = learner$predict(task, row_ids = test_indx )$score()
+
+    data_list[[index]] = list(cp = cp, train_error = train_error,
+      test_error = test_error)
+    index = index + 1
+  }
+  tree_res = dplyr::bind_rows(data_list)
+  saveRDS(tree_res, file = 'spam/tree_res.rds')
+}
+
+tree_res = readRDS(file = 'spam/tree_res.rds')
+```
+
+```{r, warning=FALSE, cache=TRUE}
+tree_res %>%
+  tidyr::pivot_longer(cols = c('train_error', 'test_error'), names_to = 'type',
+     values_to = 'error', names_pattern = '(.*)_') %>%
+  ggplot(aes(x = cp, y = error, color = type)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(
+    trans = c('log10', 'reverse'),
+    #breaks = scales::trans_breaks('log10', function(x) 10^x),
+    labels = scales::trans_format('log10', scales::math_format(10^.x))
+  ) +
+  labs(y = 'Missclassification Error') +
+  theme_bw(base_size = 14) +
+  guides(color = guide_legend('Data set'))
+```
+
+:::{.green-box}
+- Train error > test error!
+- `cp` choice matters! choose $cp = 0.001$
+:::
+
+## Performance {-}
+
+Build model:
+```{r}
+tree = lrn('classif.rpart', keep_model = TRUE, cp = 0.001)
+tree$predict_type = 'prob'
+tree
+```
+
+Train tree model:
+```{r}
+#tree$train(task, row_ids = train_indx)
+tree = models$tree
+```
+
+```{r, cache=TRUE, fig.width=25, fig.height=7}
+autoplot(tree)
+```
+
+Predictions:
+```{r}
+tree_pred = tree$predict(task, row_ids = test_indx)
+tree_pred
+```
+
+Confusion table:
+```{r}
+tree_pred$confusion
+```
+
+Measure performance? => **(Mis)classification error** (default)
+```{r}
+tree_pred$score() 
+```
+
+:::{.note}
+- Various classification performance metrics exist
+- Prediction type matters (probability vs class)
+:::
+
+```{r}
+mlr_measures$keys(pattern = '^classif')
+```
+
+ROC and ROC-AUC:
+```{r}
+tree_pred$score(msr('classif.auc')) # roc-AUC
+autoplot(tree_pred, type = 'roc')
+```
+
+0ther measures for our tree model:
+```{r}
+tree_pred$score(msr('classif.acc'))
+tree_pred$score(msr('classif.bacc'))
+tree_pred$score(msr('classif.sensitivity'))
+tree_pred$score(msr('classif.specificity'))
+tree_pred$score(msr('classif.precision'))
+```
+
+## Feature importance {-}
+
+```{r, cache=TRUE}
+vimp = tibble::enframe(tree$importance(), name = 'Variable', value = 'Importance')
+vimp %>%
+  mutate(Variable = forcats::fct_reorder(Variable, Importance, .desc = TRUE)) %>%
+  dplyr::slice(1:15) %>% # keep only the 15 most important
+  ggplot(aes(x = Variable, y = Importance, fill = Variable)) +
+  scale_y_continuous(expand = c(0,0)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  ggpubr::theme_classic2(base_size = 14) +
+  labs(y = 'Importance', x = 'Features') +
+  coord_flip()
+```
+
+# Linear Regularized model {-}
+
+## Lasso {-}
+
+Model parameters:
+```{r, class.source = 'fold-show'}
+lasso = lrn('classif.cv_glmnet')
+lasso$param_set$default$nfolds
+lasso$param_set$default$alpha # lasso
+lasso$param_set$default$nlambda # how many regularization parameters to try?
+lasso$param_set$default$s # which lambda to use for prediction?
+lasso$param_set$default$standardize # as it should!
+```
+
+Train lasso model:
+```{r}
+# lasso$train(task, row_ids = train_indx)
+lasso = models$lasso
+lasso$model # lots of features!
+```
+
+:::{.blue-box}
+`lambda` hyperparameter controls the bias-variance trade-off!
+:::
+```{r, cache=TRUE}
+plot(lasso$model)
+```
+
+```{r}
+log(lasso$model$lambda.min)
+log(lasso$model$lambda.1se)
+```
+
+Confusion matrix:
+```{r}
+lasso_pred = lasso$predict(task, row_ids = test_indx)
+lasso_pred$confusion
+```
+
+Misclassification error:
+```{r}
+lasso_pred$score()
+```
+
+## Lasso 2 {-}
+
+:::{.blue-box}
+- Let's change the measure that `cv.glmnet` uses in the cross validation of `lambda` from binomial deviance (probability-based) to the misclassification error (class response-based).
+:::
+
+Train new lasso model:
+```{r}
+#lasso2 = lasso$clone(deep = TRUE)$reset() # remove trained model
+#lasso2$param_set$values = list(type.measure = 'class')
+#lasso2$train(task, row_ids = train_indx)
+lasso2 = models$lasso2
+lasso2$model
+```
+
+Confusion matrix:
+```{r}
+lasso2_pred = lasso2$predict(task, row_ids = test_indx)
+lasso2_pred$confusion
+```
+
+Misclassification error:
+```{r}
+lasso2_pred$score()
+```
+
+:::{.green-box}
+- Better than a tuned tree model!
+:::
+
+# Bagging and Random Forests {-}
+
+```{r}
+nfeats = length(task$feature_names)
+base_rf = lrn('classif.ranger', verbose = FALSE, num.threads = 16)
+base_rf
+```
+
+Train and test RFs with different `num.trees` and `mtry`:
+```{r}
+if (!file.exists('spam/forest_res.rds')) {
+  ntrees = c(1, seq(from = 10, to = 500, by = 10))
+  mtrys = c(nfeats, ceiling(nfeats/2), ceiling(sqrt(nfeats)), 1)
+
+  data_list = list()
+  index = 1
+  for (num.trees in ntrees) {
+    for (mtry in mtrys) {
+      message('#Trees: ', num.trees, ', mtry: ', mtry)
+
+      base_rf$reset()
+      base_rf$param_set$values$num.trees = num.trees
+      base_rf$param_set$values$mtry = mtry
+
+      # train model, get train set, test set and OOB errors
+      base_rf$train(task, train_indx)
+      train_error = base_rf$predict(task, train_indx)$score()
+      test_error  = base_rf$predict(task, test_indx )$score()
+      oob_error   = base_rf$oob_error()
+      train_time  = base_rf$timings['train'] # in secs
+
+      data_list[[index]] = tibble::tibble(ntrees = num.trees, mtry = mtry,
+        train_time = train_time, train_error = train_error,
+        test_error = test_error, oob_error = oob_error)
+      index = index + 1
+    }
+  }
+
+  forest_res = dplyr::bind_rows(data_list)
+
+  saveRDS(forest_res, file = 'spam/forest_res.rds')
+}
+forest_res = readRDS(file = 'spam/forest_res.rds')
+```
+
+## Tuning `num.trees` and `mtry` {-}
+
+```{r, cache=TRUE}
+forest_res %>%
+  mutate(mtry = as.factor(mtry)) %>%
+  ggplot(aes(x = ntrees, y = test_error, color = mtry)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(xintercept = 200, color = 'red', linetype = 'dashed') +
+  labs(y = 'Test Error', x = 'Number of Trees',
+    title = 'Bagging vs Random Forests (mtry)') +
+  theme_bw(base_size = 14)
+```
+
+:::{.green-box}
+- Not all trees are needed!
+- Tuning `mtry` is important!
+- RFs is a better model than bagged trees
+:::
+
+## Training time {-}
+
+```{r, cache=TRUE}
+forest_res %>%
+  mutate(mtry = as.factor(mtry)) %>%
+  ggplot(aes(x = ntrees, y = train_time, color = mtry)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(xintercept = 200, color = 'red', linetype = 'dashed') +
+  labs(y = 'Time to train Forest (secs)', x = 'Number of Trees',
+    title = 'Parallelized training using 16 cores') +
+  theme_bw(base_size = 14)
+```
+
+:::{.green-box}
+- Parallelization is important!
+:::
+
+## OOB vs test error {-}
+
+```{r, cache=TRUE}
+forest_res %>%
+  filter(mtry == 8) %>%
+  tidyr::pivot_longer(cols = ends_with('error'), names_pattern = '(.*)_error',
+    names_to = 'type', values_to = 'error') %>%
+  ggplot(aes(x = ntrees, y = error, color = type)) +
+  geom_line() +
+  labs(x = 'Number of Trees', y = 'Misclassification Error',
+    title = 'Out-Of-Bag error for generalization',
+    subtitle = 'mtry = 8 features') +
+  theme_bw(base_size = 14)
+```
+
+:::{.green-box}
+- OOB error is a good approximation of the generalization error!
+:::
+
+## Performance {-}
+
+Let's use $num.trees=200$ and $mtry=57$ (all features) for the bagged ensemble tree model while $mtry=8$ (square root of #features) for the random forest model:
+```{r, eval=FALSE}
+bagged_trees = base_rf$clone(deep = TRUE)$reset()
+random_forest = base_rf$clone(deep = TRUE)$reset()
+
+bagged_trees$param_set$values$num.trees = 200
+bagged_trees$param_set$values$mtry = nfeats
+random_forest$param_set$values$num.trees = 200
+random_forest$param_set$values$mtry = 8
+random_forest$param_set$values$importance = 'permutation'
+
+bagged_trees$train(task, train_indx)
+random_forest$train(task, train_indx)
+```
+
+Trained random forest model:
+```{r}
+random_forest = models$random_forest
+random_forest$model
+```
+
+Bagged trees prediction performance:
+```{r}
+bagged_trees = models$bagged_trees
+bt_pred = bagged_trees$predict(task, test_indx)
+bt_pred$confusion
+bt_pred$score()
+```
+
+Random forest prediction performance:
+```{r}
+rf_pred = random_forest$predict(task, test_indx)
+rf_pred$confusion
+rf_pred$score()
+```
+
+:::{.green-box}
+- Bagged trees show better performance (lower error) on the test set compared to Lasso
+- Random forests do even better than bagged trees (as expected)
+:::
+
+## Feature Importance {-}
+
+```{r,cache=TRUE}
+rf_vimp = tibble::enframe(random_forest$importance(), name = 'Variable',
+  value = 'Importance')
+rf_vimp %>%
+  mutate(Variable = forcats::fct_reorder(Variable, Importance, .desc = TRUE)) %>%
+  dplyr::slice(1:15) %>% # keep only the 15 most important
+  ggplot(aes(x = Variable, y = Importance, fill = Variable)) +
+  scale_y_continuous(expand = c(0,0)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  ggpubr::theme_classic2(base_size = 14) +
+  labs(y = 'Permutation Importance', x = 'Features') +
+  coord_flip()
+```
+
+:::{.green-box}
+- RF feature importance != single tree feature importance (but top features are approximately the same)
+:::
+
+# Gradient-boosted Trees {-}
+
+```{r}
+base_xgboost = lrn('classif.xgboost', nthread = 8,
+  nrounds = 150, max_depth = 5, eta = 0.3)
+base_xgboost
+```
+
+## Tuning XGBoost {-}
+
+Train and test GB trees with different:
+
+- `nrounds` (how many trees/boosting iterations)
+- `max_depth` (how large can each tree grow)
+- `eta` (learning rate)
+
+```{r,eval=FALSE}
+if (!file.exists('spam/xgboost_res.rds')) {
+  max_depths = c(1,3,5,7) # how large is each tree?
+  etas = c(0.001, 0.01, 0.1, 0.3) # learning rate
+  nrounds = c(1, seq(from = 25, to = 1500, by = 25)) # number of trees
+
+  param_grid = data.table::CJ(nrounds = nrounds, max_depth = max_depths,
+    eta = etas, sorted = FALSE)
+
+  data_list = list()
+  index = 1
+  for (row_id in 1:nrow(param_grid)) {
+    max_depth = param_grid[row_id]$max_depth
+    nrounds = param_grid[row_id]$nrounds
+    eta = param_grid[row_id]$eta
+
+    message('#Trees: ', nrounds, ', max_depth: ', max_depth, ', eta: ', eta)
+
+    base_xgboost$reset()
+    base_xgboost$param_set$values$nrounds = nrounds
+    base_xgboost$param_set$values$max_depth = max_depth
+    base_xgboost$param_set$values$eta = eta
+
+    # train model, get train set, test set and OOB errors
+    base_xgboost$train(task, train_indx)
+    train_error = base_xgboost$predict(task, train_indx)$score()
+    test_error  = base_xgboost$predict(task, test_indx )$score()
+    train_time  = base_xgboost$timings['train'] # in secs
+
+    data_list[[row_id]] = tibble::tibble(nrounds = nrounds,
+      max_depth = max_depth, eta = eta, train_time = train_time,
+      train_error = train_error, test_error = test_error)
+  }
+
+  xgboost_res = dplyr::bind_rows(data_list)
+
+  saveRDS(xgboost_res, file = 'spam/xgboost_res.rds')
+}
+```
+
+## Effect of `max_depth` vs `nrounds` {-}
+
+```{r, cache=TRUE}
+xgboost_res = readRDS(file = 'spam/xgboost_res.rds')
+xgboost_res %>%
+  filter(eta == 0.01) %>%
+  mutate(max_depth = as.factor(max_depth)) %>%
+  ggplot(aes(x = nrounds, y = test_error, color = max_depth)) +
+  geom_point() +
+  geom_line() +
+  labs(y = 'Test Error', x = 'Number of Trees (Boosting Iterations)',
+    title = 'Effect of max_depth on test error (eta = 0.01)') +
+  theme_bw(base_size = 14)
+```
+
+:::{.green-box}
+- Best: $max_depth = 5$
+:::
+
+## Effect of `eta` vs `nrounds` {-}
+
+```{r, cache=TRUE}
+xgboost_res %>%
+  filter(max_depth == 5) %>%
+  mutate(eta = as.factor(eta)) %>%
+  ggplot(aes(x = nrounds, y = test_error, color = eta)) +
+  geom_point() +
+  geom_line() +
+  labs(y = 'Test Error', x = 'Number of Trees (Boosting Iterations)',
+    title = 'Effect of eta (learning rate) on test error (max_depth = 5)') +
+  theme_bw(base_size = 14)
+```
+
+:::{.green-box}
+- `eta` small => slow training
+- `eta` large => overfitting occurs!
+- Choose $eta=0.01$ and $nrounds=1000$ for final model
+:::
+
+## Training time {-}
+
+```{r, cache=TRUE}
+xgboost_res %>%
+  filter(eta == 0.01) %>%
+  mutate(max_depth = as.factor(max_depth)) %>%
+  ggplot(aes(x = nrounds, y = train_time, color = max_depth)) +
+  geom_point() +
+  geom_line() +
+  labs(y = 'Time to train (secs)', x = 'Number of Trees (Boosting Iterations)',
+    title = 'Parallelized training using 8 cores (eta = 0.01)') +
+  theme_bw(base_size = 14)
+
+xgboost_res %>%
+  filter(max_depth == 5) %>%
+  mutate(eta = as.factor(eta)) %>%
+  ggplot(aes(x = nrounds, y = train_time, color = eta)) +
+  geom_point() +
+  geom_line() +
+  labs(y = 'Time to train (secs)', x = 'Number of Trees (Boosting Iterations)',
+    title = 'Parallelized training using 8 cores (max_depth = 5)') +
+  theme_bw(base_size = 14)
+```
+
+:::{.green-box}
+- More trees (`nrounds`) => more training time
+- Growing larger trees (`max_depth`) takes more time
+- `eta` not so important for faster training in this dataset
+:::
+
+## Performance {-}
+
+Let's use $nrounds=1000$, $max\_depth=5$ and $eta=0.01$:
+
+```{r, eval=FALSE}
+xgb = base_xgboost$clone(deep = TRUE)$reset()
+xgb$param_set$values$nrounds = 1000
+xgb$param_set$values$max_depth = 5
+xgb$param_set$values$eta = 0.01
+
+# `logloss` is the default (negative log-likelihood)
+# loss function used in xgboost for classification
+# but we can change that to misclassification error
+# see https://xgboost.readthedocs.io/en/stable/parameter.html#learning-task-parameters
+
+# xgb$param_set$values$eval_metric = 'error'
+
+xgb$train(task, train_indx)
+```
+
+```{r}
+xgb = models$xgb
+xgb$model
+```
+
+Confusion matrix:
+```{r}
+xgb_pred = xgb$predict(task, test_indx)
+xgb_pred$confusion
+```
+
+Misclassification error:
+```{r}
+xgb_pred$score()
+```
+
+:::{.green-box}
+- GBoosted trees have even better performance than random forests
+:::
+
+## Feature importance {-}
+
+:::{.note}
+- Use `xgboost::xgb.importance()` function
+:::
+
+```{r, cache=TRUE}
+xgb_vimp = tibble::enframe(xgb$importance(), name = 'Variable',
+  value = 'Importance')
+xgb_vimp %>%
+  mutate(Variable = forcats::fct_reorder(Variable, Importance, .desc = TRUE)) %>%
+  dplyr::slice(1:15) %>% # keep only the 15 most important
+  ggplot(aes(x = Variable, y = Importance, fill = Variable)) +
+  scale_y_continuous(expand = c(0,0)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  ggpubr::theme_classic2(base_size = 14) +
+  labs(y = 'XGBoost Importance', x = 'Features') +
+  coord_flip()
+```
+
+# SVMs {-}
+
+```{r}
+base_svm = lrn('classif.svm')
+base_svm$param_set$values$type = 'C-classification'
+```
+
+Let's train a SVM model with a **polynomial kernel**:
+```{r, eval=FALSE}
+poly_svm = base_svm$clone(deep = TRUE)
+poly_svm$param_set$values$kernel = 'polynomial'
+poly_svm$param_set$values$degree = 3
+poly_svm$param_set$values$cost = 1000 # cost => bias-variance tradeoff
+
+poly_svm$train(task, row_ids = train_indx)
+```
+
+```{r}
+poly_svm = models$poly_svm
+poly_svm$model
+```
+
+Misclassification error:
+```{r}
+svm_pred = poly_svm$predict(task, row_ids = test_indx)
+svm_pred$score()
+```
+
+Let's train a SVM model with a **radial basis kernel**:
+```{r, eval=FALSE}
+radial_svm = base_svm$clone(deep = TRUE)
+radial_svm$param_set$values$kernel = 'radial'
+radial_svm$param_set$values$gamma = 0.01
+radial_svm$param_set$values$cost = 3
+
+radial_svm$train(task, row_ids = train_indx)
+```
+
+```{r}
+radial_svm = models$radial_svm
+radial_svm$model
+```
+
+Misclassification error:
+```{r}
+svm_pred = radial_svm$predict(task, row_ids = test_indx)
+svm_pred$score() # ~5.2%
+```
+
+:::{.note}
+- The results above were from manual tuning => I played around with the hyperparameters `cost`, `gamma`, `degree`, until I got a better (lower) error.
+- Can we do better? Well, it is difficult to properly tune these complex models! I tried a bit of Bayesian Optimization tuning (see [tuning_svms_on_spam.R](link)) and got $\approx 6\%$ error - so nothing too great.
+:::
+
+# Neural Networks {-}
+## Single-layer NN {-}
+
+```{r, eval=FALSE}
+nnet = lrn('classif.nnet', size = 20, MaxNWts = 10000, maxit = 500)
+nnet$train(task, row_ids = train_indx)
+```
+
+```{r}
+nnet = models$nnet
+nnet
+nnet$model
+```
+
+```{r}
+nnet$predict(task, test_indx)$score() # ~5.4%
+```
+
+## Multi-layer NN {-}
+
+:::{.blue-box} 
+- We switch to python for this! See http://tiny.cc/spam-nn
+:::
+
+# Stacked model {-}
+
+We are going to make a 2-level staking model using base models we have already seen.
+We will use the implementation from [mlr3pipelines::mlr_graphs_stacking](https://mlr3pipelines.mlr-org.com/reference/mlr_graphs_stacking.html).
+
+Visualize stacked learner:
+```{r, out.width="100%"}
+base_learners = list(
+  lrn('classif.cv_glmnet', type.measure = 'class'), # Lasso
+  lrn('classif.ranger', verbose = FALSE, num.threads = 16,
+    num.trees = 200, mtry = 8), # RFs
+  lrn('classif.xgboost', nthread = 8, nrounds = 1000,
+    max_depth = 5, eta = 0.01), # XGBoost
+  lrn('classif.svm', type = 'C-classification', kernel = 'radial',
+    gamma = 0.01, cost = 3) # SVM
+)
+super_learner = lrn('classif.rpart', keep_model = TRUE, cp = 0.001) # tree
+
+graph_stack = mlr3pipelines::pipeline_stacking(
+  base_learners, super_learner, folds = 5, use_features = TRUE
+)
+graph_stack$plot(html = TRUE)
+```
+
+```{r, eval=FALSE}
+stacked_lrn = as_learner(graph_stack)
+stacked_lrn
+
+stacked_lrn$train(task, row_ids = train_indx)
+```
+
+Many parameters!
+```{r}
+stacked_lrn = models$stacked_lrn
+stacked_lrn
+```
+
+Output tree model:
+```{r, fig.width=6, fig.height=6, cache=TRUE}
+rpart.plot::rpart.plot(stacked_lrn$model$classif.rpart$model,
+  digits = 2, extra = 103)
+```
+
+Misclassification error:
+```{r}
+stack_pred = stacked_lrn$predict(task, row_ids = test_indx)
+stack_pred$score()
+```
+
+# Final Benchmark {-}
+
+```{r, cache=TRUE}
+res = lapply(models, function(model) {
+  model$predict(task, test_indx)$score()
+})
+
+dplyr::bind_rows(res) %>% 
+  add_column(model = names(res), .before = 1) %>% 
+  mutate(classif.ce = num(100*classif.ce, digits = 2)) %>%
+  arrange(classif.ce)
+```
+
+
+
+# R Session Info {-}
+
+```{r session info, comment='', class.source = 'fold-show'}
+xfun::session_info()
+```
