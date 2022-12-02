@@ -552,7 +552,7 @@ xgboost_res %>%
 ```
 
 :::{.green-box}
-- Best: $max_depth = 5$
+- Best: $max\_depth = 5$
 :::
 
 ## Effect of `eta` vs `nrounds` {-}
